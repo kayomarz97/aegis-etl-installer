@@ -36,6 +36,7 @@ import subprocess
 import sys
 import time
 import uuid
+import threading
 import webbrowser
 from pathlib import Path, PurePosixPath
 
@@ -223,6 +224,16 @@ def _load_order_state() -> dict | None:
     return None
 
 
+def _open_browser(url: str) -> None:
+    """Open browser in a background thread so it never blocks the wizard."""
+    def _try():
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass  # No browser available — URL already printed above
+    threading.Thread(target=_try, daemon=True).start()
+
+
 def _delete_order_state() -> None:
     try:
         Path(ORDER_STATE_FILE).unlink()
@@ -381,7 +392,7 @@ def _phase1() -> None:
         )
         if not _confirm("  Open payment page and continue waiting?", default=True):
             sys.exit(0)
-        webbrowser.open(payment_url)
+        _open_browser(payment_url)
         creds = _poll_for_license(order_id)
         _finalize(creds, fingerprint, install_dir)
         return
