@@ -322,7 +322,9 @@ def _configure_insecure_registry(host: str) -> None:
             )
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr.strip())
-            subprocess.run(["sudo", "systemctl", "reload", "docker"], check=True)
+            # reload doesn't apply daemon.json changes — full restart required
+            subprocess.run(["sudo", "systemctl", "restart", "docker"], check=True)
+            time.sleep(3)  # wait for daemon to come back up
             console.print(f"  [green]✓ Configured Docker insecure registry for {host}[/]")
     except Exception as e:
         console.print(
