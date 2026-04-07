@@ -4,6 +4,10 @@
 
 set -e
 
+# When piped through curl (curl ... | bash), stdin is the pipe not the terminal.
+# Re-attach stdin to the terminal so interactive prompts work.
+exec < /dev/tty
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
 echo -e "${CYAN}"
@@ -38,7 +42,7 @@ INSTALL_DIR="${AEGIS_INSTALL_DIR:-$HOME/aegis-etl}"
 
 if [ -d "$INSTALL_DIR" ]; then
   echo -e "${YELLOW}Directory $INSTALL_DIR already exists.${NC}"
-  read -r -p "  Use it anyway? (existing .env will be preserved) [Y/n]: " ans
+  read -r -p "  Use it anyway? (existing .env will be preserved) [Y/n]: " ans < /dev/tty
   ans="${ans:-Y}"
   if [[ ! "$ans" =~ ^[Yy] ]]; then
     echo "Aborted."
