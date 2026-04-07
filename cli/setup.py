@@ -39,6 +39,14 @@ import uuid
 import webbrowser
 from pathlib import Path, PurePosixPath
 
+# When launched via `curl | bash`, stdin is the pipe not the terminal.
+# Re-attach stdin to /dev/tty so interactive prompts work.
+if not sys.stdin.isatty():
+    try:
+        sys.stdin = open("/dev/tty", "r")
+    except OSError:
+        pass  # /dev/tty unavailable (e.g. CI) — prompts will still fail gracefully
+
 try:
     import urllib.request
     import urllib.error
