@@ -43,7 +43,7 @@ The setup wizard will:
 4. Pull the Docker images from the private registry
 5. Display your **installation fingerprint**
 
-> **Send your fingerprint to `support@aegis-etl.com`** to receive your license key.
+> **Send your fingerprint to your Aegis vendor contact** to receive your license key.
 
 ### Phase 2: Activate License
 
@@ -97,4 +97,4 @@ python cli/aegis.py version
 
 ## Support
 
-Contact `support@aegis-etl.com` for licensing, configuration, and technical support.
+Contact your Aegis vendor for licensing, configuration, and technical support.
