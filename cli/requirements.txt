@@ -1,0 +1,5 @@
+# Aegis-ETL CLI dependencies
+# Kept separate from the backend's requirements.txt to keep Docker images lean.
+typer[all]==0.15.1           # MIT  | CLI framework with rich integration
+rich==13.9.4                 # MIT  | Beautiful terminal output (tables, progress bars, panels)
+requests==2.32.3             # Apache-2.0 | HTTP client for FastAPI communication
