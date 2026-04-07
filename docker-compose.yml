@@ -51,10 +51,10 @@ services:
       start_period: 120s
 
   # ---------------------------------------------------------------------------
-  # Aegis-ETL application (pulled from GHCR)
+  # Aegis-ETL application (pulled from Aegis private registry)
   # ---------------------------------------------------------------------------
   app:
-    image: ghcr.io/kayomarz97/aegis-backend:latest
+    image: ${REGISTRY_HOST}/aegis-backend:latest
     restart: unless-stopped
 
     # Static MAC and hostname pin the license fingerprint across restarts.

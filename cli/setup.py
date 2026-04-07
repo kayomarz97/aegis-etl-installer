@@ -1,33 +1,49 @@
 #!/usr/bin/env python3
 """
-Aegis-ETL Setup Wizard — Interactive .env generator.
+Aegis-ETL Setup Wizard — Interactive .env generator + automated license delivery.
 
 Two-phase design:
   Phase 1 (first run):
-    - Prompts for GHCR PAT → validates via docker login
+    - Checks prerequisites (Docker, Docker Compose)
+    - Prompts for service configuration
     - Generates auto-secrets (POSTGRES_PASSWORD, API keys, etc.)
-    - Writes a partial .env (without LICENSE_KEY / AEGIS_VENDOR_SECRET)
-    - Pulls Docker images
-    - Runs the container in --diagnostic mode to obtain the fingerprint
-    - Prints the fingerprint and tells the user to contact Aegis support
+    - Writes a partial .env (LICENSE_KEY / AEGIS_VENDOR_SECRET commented out)
+    - Computes fingerprint locally (pure Python — no container needed)
+    - Creates a Razorpay order via the Aegis portal
+    - Opens payment URL in browser
+    - Polls portal until payment confirmed
+    - Logs in to the Aegis registry and pulls Docker images
+    - Writes full credentials to .env
+    - Starts docker compose up -d
 
   Phase 2 (--complete flag):
-    - Prompts for LICENSE_KEY and AEGIS_VENDOR_SECRET (provided by vendor)
-    - Appends them to the existing .env
-    - Starts docker compose up -d
+    Manual fallback: prompts for LICENSE_KEY and AEGIS_VENDOR_SECRET
+    and starts services. Use only if Phase 1 polling was interrupted
+    and you received credentials by other means.
 
 Usage:
     python cli/setup.py             # Phase 1: initial setup
-    python cli/setup.py --complete  # Phase 2: enter license key and start
+    python cli/setup.py --complete  # Phase 2: manual license entry fallback
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import secrets
 import subprocess
 import sys
-from pathlib import Path
+import time
+import uuid
+import webbrowser
+from pathlib import Path, PurePosixPath
+
+try:
+    import urllib.request
+    import urllib.error
+except ImportError:
+    pass
 
 # ---------------------------------------------------------------------------
 # Optional rich import — graceful fallback for minimal environments
@@ -47,7 +63,6 @@ except ImportError:
         """Minimal console fallback when rich is not installed."""
 
         def print(self, *args: object, **kwargs: object) -> None:
-            # Strip rich markup for plain output
             text = str(args[0]) if args else ""
             import re
             text = re.sub(r"\[.*?\]", "", text)
@@ -60,45 +75,70 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-GHCR_REGISTRY = "ghcr.io"
-GHCR_USERNAME = "aegis-client"  # Fixed pull-only username
-IMAGE_ORG = "kayomarz97"
+PORTAL_BASE_URL = os.environ.get("AEGIS_PORTAL_URL", "http://161.97.93.228:8080")
+ORDER_STATE_FILE = ".aegis_order.json"
+POLL_INTERVAL_SECONDS = 5
+POLL_TIMEOUT_SECONDS = 600   # 10 minutes
 ENV_FILE = ".env"
-
 VECTOR_DIM_CHOICES = ["128", "256", "384", "512", "768"]
+
+# Pinned hostname — must match docker-compose.yml `hostname: aegis-node`
+_PINNED_HOSTNAME = "aegis-node"
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers — subprocess / HTTP
 # ---------------------------------------------------------------------------
 
 def _run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess with reasonable defaults."""
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)  # type: ignore[arg-type]
 
 
-def _validate_ghcr_login(pat: str) -> bool:
-    """Attempt docker login to GHCR. Returns True on success."""
-    result = _run([
-        "docker", "login", GHCR_REGISTRY,
-        "-u", GHCR_USERNAME,
-        "-p", pat,
-    ])
-    return result.returncode == 0
+def _http_post(url: str, body: dict, timeout: int = 15) -> dict:
+    """Simple HTTP POST — no external dependencies."""
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode(errors="replace")
+        raise RuntimeError(f"HTTP {e.code} from portal: {body_text}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Could not reach Aegis portal at {PORTAL_BASE_URL}: {e.reason}") from e
 
+
+def _http_get(url: str, timeout: int = 15) -> dict:
+    """Simple HTTP GET — no external dependencies."""
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode(errors="replace")
+        raise RuntimeError(f"HTTP {e.code} from portal: {body_text}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Could not reach Aegis portal at {PORTAL_BASE_URL}: {e.reason}") from e
+
+
+# ---------------------------------------------------------------------------
+# Helpers — user prompts
+# ---------------------------------------------------------------------------
 
 def _generate_secret(length: int = 32) -> str:
-    """Generate a URL-safe random secret."""
     return secrets.token_urlsafe(length)
 
 
 def _generate_hex_secret(length: int = 32) -> str:
-    """Generate a hex random secret (always >= 32 chars for length >= 16)."""
     return secrets.token_hex(length)
 
 
 def _prompt(message: str, default: str = "", password: bool = False) -> str:
-    """Prompt with rich if available, fallback to input()."""
     if HAS_RICH:
         return Prompt.ask(message, default=default or None, password=password) or default
     if password:
@@ -108,7 +148,6 @@ def _prompt(message: str, default: str = "", password: bool = False) -> str:
 
 
 def _prompt_int(message: str, default: int = 0) -> int:
-    """Prompt for an integer."""
     if HAS_RICH:
         return IntPrompt.ask(message, default=default)
     while True:
@@ -120,7 +159,6 @@ def _prompt_int(message: str, default: int = 0) -> int:
 
 
 def _confirm(message: str, default: bool = True) -> bool:
-    """Prompt for yes/no."""
     if HAS_RICH:
         return Confirm.ask(message, default=default)
     suffix = " [Y/n]: " if default else " [y/N]: "
@@ -131,23 +169,183 @@ def _confirm(message: str, default: bool = True) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: Initial setup
+# Fingerprint (mirrors src/licensing/validator.py — keep in sync)
+# ---------------------------------------------------------------------------
+
+def _compute_fingerprint(install_dir: Path) -> str:
+    """
+    Compute the hardware fingerprint in pure Python.
+    Mirrors validator.py logic exactly:
+      sha256(install_id + ":" + hostname + ":" + cpu_count)
+    install_id is a UUID persisted to data/.aegis_install_id
+    hostname is hardcoded to "aegis-node" (pinned in docker-compose)
+    cpu_count uses os.cpu_count() — same value inside and outside Docker
+    """
+    id_file = install_dir / "data" / ".aegis_install_id"
+    id_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if id_file.exists():
+        install_id = id_file.read_text().strip()
+    else:
+        install_id = str(uuid.uuid4())
+        id_file.write_text(install_id)
+
+    cpu_count = os.cpu_count() or 1
+    raw = f"{install_id}:{_PINNED_HOSTNAME}:{cpu_count}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Order state persistence
+# ---------------------------------------------------------------------------
+
+def _save_order_state(state: dict) -> None:
+    Path(ORDER_STATE_FILE).write_text(json.dumps(state, indent=2))
+
+
+def _load_order_state() -> dict | None:
+    p = Path(ORDER_STATE_FILE)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return None
+    return None
+
+
+def _delete_order_state() -> None:
+    try:
+        Path(ORDER_STATE_FILE).unlink()
+    except FileNotFoundError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Portal API calls
+# ---------------------------------------------------------------------------
+
+def _create_order(fingerprint: str) -> dict:
+    """POST /api/v1/order/create. Returns {order_id, payment_url, ...}."""
+    console.print("  Contacting Aegis portal...")
+    try:
+        result = _http_post(
+            f"{PORTAL_BASE_URL}/api/v1/order/create",
+            {"fingerprint": fingerprint},
+        )
+    except RuntimeError as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        sys.exit(1)
+    return result
+
+
+def _poll_for_license(order_id: str) -> dict:
+    """
+    Poll GET /api/v1/order/{order_id}/status every POLL_INTERVAL_SECONDS.
+    Returns full credentials dict when status == 'paid'.
+    Saves order state on timeout so next run can resume.
+    """
+    deadline = time.time() + POLL_TIMEOUT_SECONDS
+    spinner = ["|", "/", "-", "\\"]
+    i = 0
+
+    while time.time() < deadline:
+        try:
+            data = _http_get(f"{PORTAL_BASE_URL}/api/v1/order/{order_id}/status")
+        except RuntimeError as e:
+            console.print(f"\n[bold yellow]Warning:[/] {e} — retrying...")
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        if data.get("status") == "paid":
+            console.print("\n  [green]✓ Payment confirmed![/]")
+            return data
+
+        # Still pending — show spinner
+        print(f"\r  Waiting for payment... {spinner[i % 4]}", end="", flush=True)
+        i += 1
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    # Timed out
+    print()
+    console.print(
+        f"\n[bold yellow]Timed out waiting for payment.[/]\n"
+        f"Your order ID has been saved to [bold]{ORDER_STATE_FILE}[/].\n"
+        f"Re-run [bold]python cli/setup.py[/] to resume."
+    )
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Registry login + image pull
+# ---------------------------------------------------------------------------
+
+def _configure_insecure_registry(host: str) -> None:
+    """Add host to /etc/docker/daemon.json insecure-registries if not already present."""
+    daemon_json = Path("/etc/docker/daemon.json")
+    try:
+        if daemon_json.exists():
+            config = json.loads(daemon_json.read_text())
+        else:
+            config = {}
+        registries: list = config.get("insecure-registries", [])
+        if host not in registries:
+            registries.append(host)
+            config["insecure-registries"] = registries
+            content = json.dumps(config, indent=2)
+            # Write via sudo tee
+            proc = subprocess.run(
+                ["sudo", "tee", str(daemon_json)],
+                input=content,
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr.strip())
+            subprocess.run(["sudo", "systemctl", "reload", "docker"], check=True)
+            console.print(f"  [green]✓ Configured Docker insecure registry for {host}[/]")
+    except Exception as e:
+        console.print(
+            f"[bold yellow]Warning:[/] Could not configure insecure registry automatically: {e}\n"
+            f"  If login fails, add {host!r} to /etc/docker/daemon.json manually."
+        )
+
+
+def _login_registry(host: str, username: str, password: str) -> None:
+    console.print(f"  Logging in to registry {host}...")
+    _configure_insecure_registry(host)
+    result = subprocess.run(
+        ["docker", "login", host, "-u", username, "--password-stdin"],
+        input=password,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(
+            f"[bold red]Error:[/] docker login failed:\n  {result.stderr.strip()}"
+        )
+        sys.exit(1)
+    console.print("  [green]✓ Registry login successful[/]")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Automated payment + license delivery
 # ---------------------------------------------------------------------------
 
 def _phase1() -> None:
-    """Phase 1: validate GHCR PAT, generate secrets, write partial .env."""
     if HAS_RICH:
         console.print(Panel(
             "[bold cyan]Aegis-ETL Setup Wizard[/]\n\n"
             "This wizard will configure your Aegis-ETL deployment.\n"
-            "You will need your [bold]GHCR access token[/] (provided by Aegis support).",
+            "You will be directed to a payment page to activate your license.",
             title="Welcome",
             border_style="cyan",
         ))
     else:
         print("\n=== Aegis-ETL Setup Wizard ===\n")
 
-    # --- Check prerequisites ---
+    install_dir = Path.cwd()
+
+    # --- Prerequisites ---
     docker_check = _run(["docker", "--version"])
     if docker_check.returncode != 0:
         console.print("[bold red]Error:[/] Docker is not installed or not in PATH.")
@@ -161,25 +359,25 @@ def _phase1() -> None:
         )
         sys.exit(1)
 
-    # --- Step 1: GHCR PAT ---
-    console.print("\n[bold]Step 1: Container Registry Authentication[/]")
-    ghcr_pat = _prompt("  Enter your GHCR access token", password=True)
-
-    if not ghcr_pat:
-        console.print("[bold red]Error:[/] Token cannot be empty.")
-        sys.exit(1)
-
-    console.print("  Validating token...")
-    if not _validate_ghcr_login(ghcr_pat):
+    # --- Check for saved order (resume after interruption) ---
+    saved_state = _load_order_state()
+    if saved_state:
+        order_id = saved_state["order_id"]
+        fingerprint = saved_state["fingerprint"]
+        payment_url = saved_state["payment_url"]
         console.print(
-            "[bold red]Error:[/] docker login to ghcr.io failed.\n"
-            "  Check that your token has [bold]read:packages[/] scope."
+            f"\n[bold yellow]Resuming previous order:[/] {order_id}\n"
+            f"  Payment URL: {payment_url}\n"
         )
-        sys.exit(1)
-    console.print("  [green]✓ GHCR authentication successful[/]")
+        if not _confirm("  Open payment page and continue waiting?", default=True):
+            sys.exit(0)
+        webbrowser.open(payment_url)
+        creds = _poll_for_license(order_id)
+        _finalize(creds, fingerprint, install_dir)
+        return
 
-    # --- Step 2: Service configuration ---
-    console.print("\n[bold]Step 2: Service Configuration[/]")
+    # --- Service configuration ---
+    console.print("\n[bold]Step 1: Service Configuration[/]")
 
     pii_enabled = _confirm("  Enable PII masking?", default=True)
     worker_concurrency = _prompt_int("  Worker concurrency", default=4)
@@ -197,8 +395,8 @@ def _phase1() -> None:
 
     swagger_enabled = _confirm("  Enable Swagger docs (dev only)?", default=False)
 
-    # --- Step 3: Generate secrets ---
-    console.print("\n[bold]Step 3: Generating Secrets[/]")
+    # --- Generate secrets ---
+    console.print("\n[bold]Step 2: Generating Secrets[/]")
 
     postgres_password = _generate_secret(24)
     ingest_api_key = _generate_secret(32)
@@ -207,7 +405,7 @@ def _phase1() -> None:
 
     console.print("  [green]✓ All secrets generated[/]")
 
-    # --- Step 4: Write .env ---
+    # --- Write partial .env ---
     env_path = Path(ENV_FILE)
     if env_path.exists():
         overwrite = _confirm(
@@ -221,9 +419,6 @@ def _phase1() -> None:
     env_lines = [
         "# Aegis-ETL Configuration",
         "# Generated by setup wizard — do not edit manually unless required.",
-        "#",
-        "# Phase 1: auto-generated values. LICENSE_KEY and AEGIS_VENDOR_SECRET",
-        "# will be added in Phase 2 after fingerprint registration.",
         "",
         "# --- Database ---",
         f"POSTGRES_PASSWORD={postgres_password}",
@@ -249,7 +444,7 @@ def _phase1() -> None:
         "# --- Feature Toggles ---",
         f"SWAGGER_ENABLED={'true' if swagger_enabled else 'false'}",
         "",
-        "# --- Licensing (filled in Phase 2) ---",
+        "# --- Licensing (written after payment) ---",
         "# AEGIS_VENDOR_SECRET=",
         "# LICENSE_KEY=",
         "",
@@ -258,88 +453,112 @@ def _phase1() -> None:
     env_content = "\n".join(env_lines)
     env_path.write_text(env_content)
     os.chmod(ENV_FILE, 0o600)
+    console.print(f"  [green]✓ {ENV_FILE} written[/]")
 
-    console.print(f"  [green]✓ {ENV_FILE} written (permissions: 600)[/]")
+    # --- Compute fingerprint locally ---
+    console.print("\n[bold]Step 3: Computing Installation Fingerprint[/]")
+    fingerprint = _compute_fingerprint(install_dir)
+    console.print(f"  [green]✓ Fingerprint:[/] {fingerprint[:16]}...")
 
-    # --- Step 5: Pull images ---
-    console.print("\n[bold]Step 4: Pulling Docker Images[/]")
-    console.print("  This may take several minutes on first run...")
+    # --- Create order ---
+    console.print("\n[bold]Step 4: Creating Payment Order[/]")
+    order = _create_order(fingerprint)
+    order_id = order["order_id"]
+    payment_url = order["payment_url"]
 
-    pull_result = subprocess.run(
-        ["docker", "compose", "pull"],
-        capture_output=False,
+    _save_order_state({
+        "order_id": order_id,
+        "fingerprint": fingerprint,
+        "payment_url": payment_url,
+    })
+
+    console.print(
+        f"\n  [bold]Payment URL:[/] {payment_url}\n"
+        f"  Opening in browser..."
     )
-    if pull_result.returncode != 0:
-        console.print(
-            "[bold red]Error:[/] docker compose pull failed.\n"
-            "  Check your network connection and GHCR token."
-        )
-        sys.exit(1)
+    webbrowser.open(payment_url)
 
+    # --- Poll for license ---
+    console.print("\n[bold]Step 5: Waiting for Payment Confirmation[/]")
+    console.print("  Complete payment in your browser, then return here.\n")
+    creds = _poll_for_license(order_id)
+
+    _finalize(creds, fingerprint, install_dir)
+
+
+def _finalize(creds: dict, fingerprint: str, install_dir: Path) -> None:
+    """After payment: login registry, pull images, write .env, start services."""
+
+    # --- Registry login ---
+    console.print("\n[bold]Step 6: Registry Authentication[/]")
+    registry_host = creds["registry_host"]
+    _login_registry(
+        registry_host,
+        creds["registry_username"],
+        creds["registry_password"],
+    )
+
+    # --- Pull images ---
+    console.print("\n[bold]Step 7: Pulling Docker Images[/]")
+    console.print("  This may take several minutes on first run...")
+    pull_result = subprocess.run(["docker", "compose", "pull"], capture_output=False)
+    if pull_result.returncode != 0:
+        console.print("[bold red]Error:[/] docker compose pull failed.")
+        sys.exit(1)
     console.print("  [green]✓ Images pulled[/]")
 
-    # --- Step 6: Get fingerprint ---
-    console.print("\n[bold]Step 5: Obtaining Installation Fingerprint[/]")
-    console.print("  Starting a temporary container to compute the fingerprint...")
+    # --- Write credentials to .env ---
+    env_path = Path(ENV_FILE)
+    env_content = env_path.read_text()
+    env_content = env_content.replace(
+        "# AEGIS_VENDOR_SECRET=",
+        f"AEGIS_VENDOR_SECRET={creds['aegis_vendor_secret']}",
+    )
+    env_content = env_content.replace(
+        "# LICENSE_KEY=",
+        f"LICENSE_KEY={creds['license_key']}",
+    )
+    env_content += (
+        f"\n# --- Registry ---\n"
+        f"REGISTRY_HOST={registry_host}\n"
+    )
+    env_path.write_text(env_content)
+    os.chmod(ENV_FILE, 0o600)
+    console.print("  [green]✓ License credentials written to .env[/]")
 
-    fp_result = _run([
-        "docker", "compose", "run", "--rm",
-        "-e", f"AEGIS_VENDOR_SECRET={'x' * 32}",  # dummy secret for diagnostic
-        "app",
-        "python", "src/licensing/validator.py", "--diagnostic",
-    ])
+    # --- Start services ---
+    console.print("\n[bold]Step 8: Starting Aegis-ETL[/]")
+    start_result = subprocess.run(["docker", "compose", "up", "-d"], capture_output=False)
+    if start_result.returncode != 0:
+        console.print("[bold red]Error:[/] docker compose up failed.")
+        sys.exit(1)
 
-    if fp_result.returncode != 0:
-        console.print(
-            "[bold yellow]Warning:[/] Could not obtain fingerprint automatically.\n"
-            "  After running 'docker compose up', use:\n"
-            "    docker compose exec app python src/licensing/validator.py --diagnostic"
+    # --- Clean up order state ---
+    _delete_order_state()
+
+    console.print(
+        Panel(
+            "[bold green]Aegis-ETL is running![/]\n\n"
+            "  API:    http://localhost:8000\n"
+            "  Health: http://localhost:8000/health\n"
+            "  Docs:   http://localhost:8000/docs (if Swagger enabled)\n\n"
+            "CLI commands:\n"
+            "  [cyan]python cli/aegis.py status[/]      — View job queue\n"
+            "  [cyan]python cli/aegis.py ingest FILE[/] — Ingest a document\n"
+            "  [cyan]python cli/aegis.py logs[/]        — Tail container logs\n"
+            "  [cyan]python cli/aegis.py backup[/]      — Backup database",
+            title="Setup Complete",
+            border_style="green",
         )
-        fingerprint = None
-    else:
-        fingerprint = fp_result.stdout.strip()
-
-    # --- Summary ---
-    console.print("")
-    if HAS_RICH:
-        summary = Table(show_header=False, border_style="dim", padding=(0, 2))
-        summary.add_column("Key", style="bold")
-        summary.add_column("Value")
-        summary.add_row("INGEST_API_KEY", ingest_api_key[:8] + "..." + ingest_api_key[-4:])
-        summary.add_row("ADMIN_API_KEY", admin_api_key[:8] + "..." + admin_api_key[-4:])
-        summary.add_row("PII Masking", "enabled" if pii_enabled else "disabled")
-        summary.add_row("Workers", str(worker_concurrency))
-        summary.add_row("Vector Dims", vector_dims)
-        if fingerprint:
-            summary.add_row("Fingerprint", fingerprint[:16] + "...")
-        console.print(Panel(summary, title="Setup Summary", border_style="green"))
-
-    if fingerprint:
-        console.print(
-            Panel(
-                f"[bold]Your installation fingerprint:[/]\n\n"
-                f"  [cyan]{fingerprint}[/]\n\n"
-                "Send this fingerprint to [bold]support@aegis-etl.com[/] to receive\n"
-                "your LICENSE_KEY and AEGIS_VENDOR_SECRET.\n\n"
-                "Then run: [bold]python cli/setup.py --complete[/]",
-                title="Next Step",
-                border_style="yellow",
-            )
-        )
-    else:
-        console.print(
-            "\n[bold yellow]Next step:[/] Contact support@aegis-etl.com with your\n"
-            "fingerprint (obtained via --diagnostic), then run:\n"
-            "  python cli/setup.py --complete"
-        )
+    )
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: Complete setup with license key
+# Phase 2: Manual fallback — enter credentials directly
 # ---------------------------------------------------------------------------
 
 def _phase2() -> None:
-    """Phase 2: add LICENSE_KEY + AEGIS_VENDOR_SECRET, start services."""
+    """Phase 2: manual license entry fallback. Used if Phase 1 polling was missed."""
     env_path = Path(ENV_FILE)
 
     if not env_path.exists():
@@ -351,19 +570,17 @@ def _phase2() -> None:
 
     if HAS_RICH:
         console.print(Panel(
-            "[bold cyan]Aegis-ETL Setup — Phase 2[/]\n\n"
-            "Enter the LICENSE_KEY and AEGIS_VENDOR_SECRET provided by Aegis support.",
+            "[bold cyan]Aegis-ETL Setup — Manual License Entry[/]\n\n"
+            "Enter the credentials provided by your Aegis vendor.",
             title="Complete Setup",
             border_style="cyan",
         ))
     else:
-        print("\n=== Aegis-ETL Setup — Phase 2 ===\n")
+        print("\n=== Aegis-ETL Setup — Manual License Entry ===\n")
 
     vendor_secret = _prompt("  Enter AEGIS_VENDOR_SECRET", password=True)
     if len(vendor_secret) < 32:
-        console.print(
-            "[bold red]Error:[/] AEGIS_VENDOR_SECRET must be at least 32 characters."
-        )
+        console.print("[bold red]Error:[/] AEGIS_VENDOR_SECRET must be at least 32 characters.")
         sys.exit(1)
 
     license_key = _prompt("  Enter LICENSE_KEY", password=True)
@@ -371,47 +588,31 @@ def _phase2() -> None:
         console.print("[bold red]Error:[/] LICENSE_KEY cannot be empty.")
         sys.exit(1)
 
-    # Update .env — replace commented-out placeholders with real values
+    registry_host = _prompt("  Enter REGISTRY_HOST (e.g. 161.97.93.228:5000)")
+    registry_username = _prompt("  Enter REGISTRY_USERNAME")
+    registry_password = _prompt("  Enter REGISTRY_PASSWORD", password=True)
+
     env_content = env_path.read_text()
-    env_content = env_content.replace(
-        "# AEGIS_VENDOR_SECRET=",
-        f"AEGIS_VENDOR_SECRET={vendor_secret}",
-    )
-    env_content = env_content.replace(
-        "# LICENSE_KEY=",
-        f"LICENSE_KEY={license_key}",
-    )
+    env_content = env_content.replace("# AEGIS_VENDOR_SECRET=", f"AEGIS_VENDOR_SECRET={vendor_secret}")
+    env_content = env_content.replace("# LICENSE_KEY=", f"LICENSE_KEY={license_key}")
+    env_content += f"\n# --- Registry ---\nREGISTRY_HOST={registry_host}\n"
     env_path.write_text(env_content)
     os.chmod(ENV_FILE, 0o600)
+    console.print("  [green]✓ .env updated[/]")
 
-    console.print("  [green]✓ .env updated with license credentials[/]")
+    _login_registry(registry_host, registry_username, registry_password)
 
-    # Start services
+    console.print("\n[bold]Pulling images...[/]")
+    subprocess.run(["docker", "compose", "pull"], check=True)
+
     console.print("\n[bold]Starting Aegis-ETL...[/]")
-    start_result = subprocess.run(
-        ["docker", "compose", "up", "-d"],
-        capture_output=False,
-    )
-
+    start_result = subprocess.run(["docker", "compose", "up", "-d"], capture_output=False)
     if start_result.returncode != 0:
         console.print("[bold red]Error:[/] docker compose up failed.")
         sys.exit(1)
 
-    console.print(
-        Panel(
-            "[bold green]Aegis-ETL is running![/]\n\n"
-            "  API:    http://localhost:8000\n"
-            "  Health: http://localhost:8000/health\n"
-            "  Docs:   http://localhost:8000/docs (if Swagger enabled)\n\n"
-            "CLI commands:\n"
-            "  [cyan]python cli/aegis.py status[/]    — View job queue\n"
-            "  [cyan]python cli/aegis.py ingest FILE[/] — Ingest a document\n"
-            "  [cyan]python cli/aegis.py logs[/]      — Tail container logs\n"
-            "  [cyan]python cli/aegis.py backup[/]    — Backup database",
-            title="🚀 Setup Complete",
-            border_style="green",
-        )
-    )
+    _delete_order_state()
+    console.print("[bold green]Done! Aegis-ETL is running.[/]")
 
 
 # ---------------------------------------------------------------------------
