@@ -1,0 +1,120 @@
+version: "3.9"
+
+# Named bridge network is required — the Compose Spec only honours
+# mac_address on user-defined networks, not the default bridge.
+networks:
+  aegis-net:
+    driver: bridge
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL + pgvector
+  # ---------------------------------------------------------------------------
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: aegis
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - aegis-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Ollama — custom entrypoint pulls models before serving
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:0.6.5
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/ollama-entrypoint.sh"]
+    volumes:
+      - ollama-data:/root/.ollama
+      - ./ollama-entrypoint.sh:/ollama-entrypoint.sh:ro
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma4:e2b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embeddinggemma}
+    networks:
+      - aegis-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  # ---------------------------------------------------------------------------
+  # Aegis-ETL application (pulled from GHCR)
+  # ---------------------------------------------------------------------------
+  app:
+    image: ghcr.io/kayomarz97/aegis-backend:latest
+    restart: unless-stopped
+
+    # Static MAC and hostname pin the license fingerprint across restarts.
+    # mac_address only works on user-defined networks (aegis-net above).
+    hostname: aegis-node
+    mac_address: "02:42:ac:11:00:02"
+
+    networks:
+      - aegis-net
+
+    ports:
+      - "${AEGIS_PORT:-8000}:8000"
+
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+    environment:
+      # --- Database ---
+      DATABASE_URL: postgresql://aegis:${POSTGRES_PASSWORD}@db:5432/aegis
+
+      # --- Ollama ---
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma4:e2b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embeddinggemma}
+
+      # --- Licensing (REQUIRED — set in .env or environment) ---
+      AEGIS_VENDOR_SECRET: ${AEGIS_VENDOR_SECRET}
+      LICENSE_KEY: ${LICENSE_KEY}
+
+      # --- Security keys (REQUIRED — set in .env or environment) ---
+      INGEST_API_KEY: ${INGEST_API_KEY}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      PII_VAULT_KEY: ${PII_VAULT_KEY}
+
+      # --- Optional overrides (defaults are production-safe) ---
+      VECTOR_DIMENSIONS: ${VECTOR_DIMENSIONS:-768}
+      DATA_DIR: /app/data
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-["*"]}
+      PII_MASKING_ENABLED: ${PII_MASKING_ENABLED:-true}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      MAX_CONCURRENT_OCR_JOBS: ${MAX_CONCURRENT_OCR_JOBS:-2}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+
+    volumes:
+      # Persistent data volume — bind-mount a host path in production:
+      #   volumes:
+      #     - /srv/aegis-data:/app/data
+      - aegis-data:/app/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  pgdata:
+  ollama-data:
+  aegis-data:
