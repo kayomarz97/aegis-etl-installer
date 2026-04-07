@@ -510,27 +510,20 @@ def _phase1() -> None:
 
 
 def _finalize(creds: dict, fingerprint: str, install_dir: Path) -> None:
-    """After payment: login registry, pull images, write .env, start services."""
+    """After payment: login registry, write .env, pull images, start services."""
+
+    registry_host = creds["registry_host"]
 
     # --- Registry login ---
     console.print("\n[bold]Step 6: Registry Authentication[/]")
-    registry_host = creds["registry_host"]
     _login_registry(
         registry_host,
         creds["registry_username"],
         creds["registry_password"],
     )
 
-    # --- Pull images ---
-    console.print("\n[bold]Step 7: Pulling Docker Images[/]")
-    console.print("  This may take several minutes on first run...")
-    pull_result = subprocess.run(["docker", "compose", "pull"], capture_output=False)
-    if pull_result.returncode != 0:
-        console.print("[bold red]Error:[/] docker compose pull failed.")
-        sys.exit(1)
-    console.print("  [green]✓ Images pulled[/]")
-
-    # --- Write credentials to .env ---
+    # --- Write credentials to .env BEFORE pulling ---
+    # docker compose pull needs REGISTRY_HOST set so it can resolve the image reference.
     env_path = Path(ENV_FILE)
     env_content = env_path.read_text()
     env_content = env_content.replace(
@@ -548,6 +541,15 @@ def _finalize(creds: dict, fingerprint: str, install_dir: Path) -> None:
     env_path.write_text(env_content)
     os.chmod(ENV_FILE, 0o600)
     console.print("  [green]✓ License credentials written to .env[/]")
+
+    # --- Pull images ---
+    console.print("\n[bold]Step 7: Pulling Docker Images[/]")
+    console.print("  This may take several minutes on first run...")
+    pull_result = subprocess.run(["docker", "compose", "pull"], capture_output=False)
+    if pull_result.returncode != 0:
+        console.print("[bold red]Error:[/] docker compose pull failed.")
+        sys.exit(1)
+    console.print("  [green]✓ Images pulled[/]")
 
     # --- Start services ---
     console.print("\n[bold]Step 8: Starting Aegis-ETL[/]")
