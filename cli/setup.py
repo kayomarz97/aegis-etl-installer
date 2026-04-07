@@ -200,7 +200,9 @@ def _compute_fingerprint(install_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _save_order_state(state: dict) -> None:
-    Path(ORDER_STATE_FILE).write_text(json.dumps(state, indent=2))
+    p = Path(ORDER_STATE_FILE)
+    p.write_text(json.dumps(state, indent=2))
+    os.chmod(p, 0o600)
 
 
 def _load_order_state() -> dict | None:
