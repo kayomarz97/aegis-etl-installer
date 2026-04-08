@@ -21,7 +21,8 @@ OLLAMA_PID=$!
 # 2. Wait for ollama serve to accept connections.
 echo "[ollama-entrypoint] Waiting for ollama serve to be ready..."
 i=0
-until curl -s -o /dev/null "${_CHECK_URL}" 2>/dev/null; do
+until curl -s -o /dev/null "http://127.0.0.1:11434/api/version" 2>/dev/null || \
+      curl -s -o /dev/null "http://[::1]:11434/api/version" 2>/dev/null; do
     i=$((i + 1))
     if [ "$i" -ge "$MAX_WAIT" ]; then
         echo "[ollama-entrypoint] ERROR: ollama serve did not become ready after ${MAX_WAIT}s"
