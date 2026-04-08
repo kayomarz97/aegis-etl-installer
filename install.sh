@@ -52,12 +52,23 @@ cd "$INSTALL_DIR"
 echo -e "${GREEN}✓ Install directory: $INSTALL_DIR${NC}"
 
 # --- Download installer files ---
-BASE_URL="https://raw.githubusercontent.com/kayomarz97/aegis-etl-installer/master"
+# VPS is primary (no CDN caching). GitHub is fallback.
+VPS_URL="http://161.97.93.228:8181"
+GH_URL="https://raw.githubusercontent.com/kayomarz97/aegis-etl-installer/master"
+
+_download() {
+  local f="$1"
+  mkdir -p "$(dirname "$f")"
+  if curl -fsSL --connect-timeout 5 "$VPS_URL/$f" -o "$f" 2>/dev/null; then
+    return 0
+  fi
+  echo -e "  ${YELLOW}VPS unreachable — falling back to GitHub for $f${NC}"
+  curl -fsSL "$GH_URL/$f" -o "$f"
+}
 
 echo "  Downloading installer files..."
 for f in docker-compose.yml ollama-entrypoint.sh cli/setup.py; do
-  mkdir -p "$(dirname "$f")"
-  curl -fsSL "$BASE_URL/$f" -o "$f"
+  _download "$f"
 done
 chmod +x ollama-entrypoint.sh
 
