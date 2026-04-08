@@ -67,7 +67,7 @@ _download() {
 }
 
 echo "  Downloading installer files..."
-for f in docker-compose.yml ollama-entrypoint.sh cli/setup.py; do
+for f in docker-compose.yml ollama-entrypoint.sh cli/setup.py cli/aegis.py cli/__init__.py; do
   _download "$f"
 done
 chmod +x ollama-entrypoint.sh
