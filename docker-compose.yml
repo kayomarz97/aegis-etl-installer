@@ -40,6 +40,10 @@ services:
     environment:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma4:e2b}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embeddinggemma}
+      # Force IPv4 binding — without this, ollama binds to [::]:11434 (IPv6)
+      # which breaks the entrypoint readiness check on hosts where IPv6 dual-stack
+      # is not enabled. 0.0.0.0 keeps it reachable from other containers via Docker network.
+      OLLAMA_HOST: http://0.0.0.0:11434
     networks:
       - aegis-net
     healthcheck:
