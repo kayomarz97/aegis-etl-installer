@@ -453,4 +453,4 @@ docker compose logs app --tail=100 > app-logs.txt
 Check `app-logs.txt` to confirm it contains no API keys or passwords, then send it
 along with a description of the problem.
 
-Contact: support@aegis-etl.com
+Contact: *(support contact coming soon)*
