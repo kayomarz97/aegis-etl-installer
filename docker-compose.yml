@@ -31,7 +31,7 @@ services:
   # Ollama — custom entrypoint pulls models before serving
   # ---------------------------------------------------------------------------
   ollama:
-    image: ollama/ollama:0.6.5
+    image: ollama/ollama:latest
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/ollama-entrypoint.sh"]
     volumes:
