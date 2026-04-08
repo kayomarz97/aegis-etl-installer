@@ -24,7 +24,8 @@ services:
       test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
 
   # ---------------------------------------------------------------------------
   # Ollama — custom entrypoint pulls models before serving
