@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Named bridge network is required — the Compose Spec only honours
 # mac_address on user-defined networks, not the default bridge.
 networks:
@@ -44,11 +42,12 @@ services:
     networks:
       - aegis-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/ || exit 1"]
+      # Check that ollama is up AND both models are loaded (listed in `ollama list`)
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/ && ollama list | grep -q '${OLLAMA_MODEL:-gemma4:e2b}' && ollama list | grep -q '${EMBEDDING_MODEL:-embeddinggemma}' || exit 1"]
       interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
+      timeout: 15s
+      retries: 40
+      start_period: 60s
 
   # ---------------------------------------------------------------------------
   # Aegis-ETL application (pulled from Aegis private registry)
