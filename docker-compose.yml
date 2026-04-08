@@ -47,12 +47,11 @@ services:
     networks:
       - aegis-net
     healthcheck:
-      # Check ollama is up AND both models appear in /api/tags.
-      # Uses the HTTP API directly — avoids spawning `ollama list` CLI which
-      # can be slow (>15s timeout) and hang while models are still loading.
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags | grep -q 'gemma4' && curl -sf http://localhost:11434/api/tags | grep -q 'embeddinggemma'"]
+      # Use ollama CLI (always present) with explicit IPv6 loopback.
+      # Avoids curl availability and IPv4/IPv6 dual-stack routing issues.
+      test: ["CMD-SHELL", "OLLAMA_HOST='http://[::1]:11434' ollama list 2>/dev/null | grep -q 'gemma4' && OLLAMA_HOST='http://[::1]:11434' ollama list 2>/dev/null | grep -q 'embeddinggemma'"]
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 40
       start_period: 120s
 
