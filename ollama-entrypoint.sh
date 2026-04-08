@@ -5,7 +5,12 @@
 # the container stays alive and SIGTERM propagates correctly.
 set -e
 
-OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+# Use a local variable for the health-check URL only.
+# Do NOT set/export OLLAMA_HOST — ollama serve inherits env vars, and if
+# OLLAMA_HOST=http://localhost:11434 it binds only to 127.0.0.1, making the
+# server unreachable from other containers via Docker's internal network.
+# Ollama's default is 0.0.0.0:11434, which is what we want.
+_CHECK_URL="http://localhost:11434"
 MAX_WAIT=120   # seconds to wait for ollama serve to become ready
 PULL_RETRIES=3
 
@@ -16,7 +21,7 @@ OLLAMA_PID=$!
 # 2. Wait for ollama serve to accept connections.
 echo "[ollama-entrypoint] Waiting for ollama serve to be ready..."
 i=0
-until curl -sf "${OLLAMA_HOST}/" >/dev/null 2>&1; do
+until curl -sf "${_CHECK_URL}/" >/dev/null 2>&1; do
     i=$((i + 1))
     if [ "$i" -ge "$MAX_WAIT" ]; then
         echo "[ollama-entrypoint] ERROR: ollama serve did not become ready after ${MAX_WAIT}s"

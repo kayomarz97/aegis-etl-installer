@@ -42,12 +42,14 @@ services:
     networks:
       - aegis-net
     healthcheck:
-      # Check that ollama is up AND both models are loaded (listed in `ollama list`)
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/ && ollama list | grep -q '${OLLAMA_MODEL:-gemma4:e2b}' && ollama list | grep -q '${EMBEDDING_MODEL:-embeddinggemma}' || exit 1"]
+      # Check ollama is up AND both models appear in /api/tags.
+      # Uses the HTTP API directly — avoids spawning `ollama list` CLI which
+      # can be slow (>15s timeout) and hang while models are still loading.
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags | grep -q 'gemma4' && curl -sf http://localhost:11434/api/tags | grep -q 'embeddinggemma'"]
       interval: 30s
-      timeout: 15s
+      timeout: 10s
       retries: 40
-      start_period: 60s
+      start_period: 120s
 
   # ---------------------------------------------------------------------------
   # Aegis-ETL application (pulled from Aegis private registry)
