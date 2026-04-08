@@ -277,9 +277,22 @@ def _poll_for_license(order_id: str) -> dict:
             time.sleep(POLL_INTERVAL_SECONDS)
             continue
 
-        if data.get("status") == "paid":
+        status = data.get("status")
+        if status == "paid":
             console.print("\n  [green]✓ Payment confirmed![/]")
             return data
+        if status == "delivered":
+            # Credentials already fetched once (e.g. previous run got them then
+            # crashed). Can't retrieve them again — the portal destroys them on
+            # first fetch for security. The user must contact support.
+            print()
+            console.print(
+                "[bold red]Error:[/] Your payment was received and credentials were already\n"
+                "  delivered in a previous run, but setup did not complete.\n\n"
+                f"  Please email support@aegis-etl.com with order ID: [bold]{order_id}[/]\n"
+                "  and we will re-issue your credentials."
+            )
+            sys.exit(1)
 
         # Still pending — show spinner
         print(f"\r  Waiting for payment... {spinner[i % 4]}", end="", flush=True)
@@ -388,6 +401,17 @@ def _phase1() -> None:
         order_id = saved_state["order_id"]
         fingerprint = saved_state["fingerprint"]
         payment_url = saved_state["payment_url"]
+
+        # If creds were already received (payment done but post-payment step
+        # failed), skip polling and go straight to _finalize.
+        if saved_state.get("creds"):
+            console.print(
+                f"\n[bold yellow]Resuming setup:[/] payment already confirmed.\n"
+                f"  Continuing from registry login...\n"
+            )
+            _finalize(saved_state["creds"], fingerprint, install_dir)
+            return
+
         console.print(
             f"\n[bold yellow]Resuming previous order:[/] {order_id}\n"
             f"  Payment URL: {payment_url}\n"
@@ -493,13 +517,14 @@ def _phase1() -> None:
         "order_id": order_id,
         "fingerprint": fingerprint,
         "payment_url": payment_url,
+        # creds stored after payment confirmed — written in _finalize
     })
 
     console.print(
         f"\n  [bold]Payment URL:[/] {payment_url}\n"
         f"  Opening in browser..."
     )
-    webbrowser.open(payment_url)
+    _open_browser(payment_url)
 
     # --- Poll for license ---
     console.print("\n[bold]Step 5: Waiting for Payment Confirmation[/]")
@@ -513,6 +538,13 @@ def _finalize(creds: dict, fingerprint: str, install_dir: Path) -> None:
     """After payment: login registry, write .env, pull images, start services."""
 
     registry_host = creds["registry_host"]
+
+    # Persist creds immediately — if any subsequent step fails and the user
+    # re-runs setup.py, the resume path skips polling (creds are already here).
+    state = _load_order_state()
+    if state and not state.get("creds"):
+        state["creds"] = creds
+        _save_order_state(state)
 
     # --- Registry login ---
     console.print("\n[bold]Step 6: Registry Authentication[/]")
@@ -563,7 +595,12 @@ def _finalize(creds: dict, fingerprint: str, install_dir: Path) -> None:
 
     console.print(
         Panel(
-            "[bold green]Aegis-ETL is running![/]\n\n"
+            "[bold green]Aegis-ETL is starting![/]\n\n"
+            "[yellow]Note:[/] Ollama is downloading AI models (~2 GB) in the background.\n"
+            "  This takes [bold]10–20 minutes[/] on first run depending on your connection.\n"
+            "  The API will not respond until models are fully loaded.\n\n"
+            "  Watch progress:  [cyan]docker logs -f aegis-etl-ollama-1[/]\n"
+            "  Check readiness: [cyan]docker compose ps[/]  (all services should be 'healthy')\n\n"
             "  API:    http://localhost:8000\n"
             "  Health: http://localhost:8000/health\n"
             "  Docs:   http://localhost:8000/docs (if Swagger enabled)\n\n"
