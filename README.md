@@ -1,33 +1,239 @@
 # Aegis-ETL
 
-**On-premise enterprise document ingestion. Your data never leaves your server.**
+**On-premise enterprise document ingestion with built-in PII masking, vector search, and encryption.**
 
-Aegis-ETL reads your documents, finds and encrypts any personal information, converts
-the content into AI-searchable vectors, and stores everything in your own private
-database — all running inside Docker on your machine.
+Transform raw documents into a searchable, privacy-safe knowledge base — with zero data leaving your server.
+
+```
+POST /ingest  →  extract  →  mask PII  →  encrypt vault  →  embed  →  search
+```
+
+Every PII entity (names, emails, SSNs, credit cards, national IDs) is replaced with a `<PLACEHOLDER>` token in stored text and encrypted with Fernet before the database ever sees it. Your database contains only ciphertext — even a stolen backup is unreadable without the vault key.
 
 ---
 
-## What It Does
+## Why Aegis-ETL
 
-Think of it as a private filing system that reads every document you give it and makes
-the content searchable — without sending anything to the cloud.
+### PII Safety — Aegis vs Competitors
+
+![PII safety comparison](charts/pii_safety.png)
+
+**Aegis is the only tool in this benchmark that masks and encrypts PII before storage.**
+
+| Tool | PDF Suite | Mixed Suite | Method |
+|------|-----------|-------------|--------|
+| **Aegis-ETL** | **0% leak** | **0% leak** | Presidio detection + Fernet encryption |
+| Unstructured.io | 100% leak | 100% leak | No PII handling |
+| LlamaIndex | 100% leak | 100% leak | No PII handling |
+| Apache Tika | 100% leak | 100% leak | No PII handling |
+
+### Format Coverage (Mixed Suite)
+
+![Format coverage](charts/format_heatmap.png)
+
+**Aegis achieves 100% success on 5 different file formats simultaneously.**
+
+### Success Rate Comparison
+
+![Success rate](charts/success_rate.png)
+
+| Tool | PDF Suite | Mixed Suite | Note |
+|------|-----------|-------------|------|
+| **Aegis-ETL** | **100%** | **100%** | Full pipeline: extract + mask + embed |
+| Unstructured.io | 100% | **82%** | Fails on XLSX/CSV edge cases |
+| LlamaIndex | 100% | **82%** | No tabular data support |
+| Apache Tika | 100% | 100% | Extract-only (no PII handling) |
+
+### Complete Feature Matrix
+
+| Feature | Aegis-ETL | Unstructured | LlamaIndex | Tika |
+|---------|-----------|--------------|------------|------|
+| **PDF extraction** | ✅ Docling + pypdf + OCR | ✅ | ✅ | ✅ |
+| **DOCX extraction** | ✅ | ✅ | ✅ | ✅ |
+| **XLSX/XLS extraction** | ✅ openpyxl + xlrd | ⚠ XLSX only | ❌ | ✅ |
+| **CSV extraction** | ✅ | ✅ | ❌ | ✅ |
+| **Scanned PDF (OCR)** | ✅ Tesseract parallel | ⚠ requires extras | ❌ | ⚠ |
+| **MSG (Outlook)** | ✅ olefile (BSD) | ⚠ | ⚠ | ✅ |
+| **PII detection** | ✅ 20+ entity types | ❌ | ❌ | ❌ |
+| **PII masking** | ✅ `<PLACEHOLDER>` tokens | ❌ | ❌ | ❌ |
+| **PII encryption** | ✅ Fernet app-layer vault | ❌ | ❌ | ❌ |
+| **Semantic embeddings** | ✅ 768-dim vectors | ❌ | ✅ external only | ❌ |
+| **Vector search** | ✅ HNSW + RRF hybrid | ❌ | ✅ external | ❌ |
+| **LLM re-ranking** | ✅ `?rerank=true` | ❌ | ❌ | ❌ |
+| **Fault tolerance** | ✅ Retry + stuck-job reset | ❌ | ❌ | ❌ |
+| **Search hit@5** | **80–90%** | n/a | n/a | n/a |
+| **Zero PII leak** | **✅** | ❌ | ❌ | ❌ |
+
+---
+
+## Throughput Context
+
+![Throughput comparison](charts/throughput.png)
+
+Aegis-ETL performs **5 complete pipeline stages** that competitors skip entirely:
+
+| Stage | Time | Aegis | Competitors |
+|-------|------|-------|-------------|
+| 1. Extract text | — | ✅ | ✅ |
+| 2. Detect & mask PII | 15–30s/file | ✅ | ❌ |
+| 3. Encrypt PII vault | 1s/file | ✅ | ❌ |
+| 4. Generate embeddings | 30–60s/file | ✅ | ❌ |
+| 5. Insert into pgvector | — | ✅ | ❌ |
+
+**Result:** Aegis at 0.5–0.7 docs/min delivers a **search-ready, PII-safe, encrypted document store** in one pipeline. Competitors at 80–580 docs/min deliver raw text only — entirely different products.
+
+### Avg Latency Per File
+
+![Latency per file](charts/latency.png)
+
+Aegis-ETL: **119s** (full pipeline including PII masking + embeddings)  
+Competitors: 0.1–14s (extract-only)
+
+### Avg Characters Extracted
+
+![Characters extracted](charts/chars_extracted.png)
+
+Consistent extraction across all formats: 3,500–6,500 chars per file.
+
+---
+
+## Supported File Formats
+
+| Format | Extensions | Method | Limits |
+|--------|-----------|--------|--------|
+| **PDF (text)** | `.pdf` | Native text extraction via Docling | — |
+| **PDF (scanned)** | `.pdf` | OCR (Tesseract + pdf2image, parallel pages) | 2 concurrent OCR jobs |
+| **Word** | `.docx`, `.doc` | Full paragraph and table extraction | — |
+| **Excel** | `.xlsx`, `.xls` | All sheets, all rows; cell-by-cell extraction | openpyxl (XLSX) + xlrd 2.0.1 (XLS) |
+| **CSV** | `.csv` | Full content, tab/comma delimited | — |
+| **Outlook** | `.msg` | Headers + body, no GPL libraries | olefile (BSD-2-Clause) only |
+| **Email** | `.eml` | Headers + body | — |
+| **Plain text** | `.txt`, `.md` | Direct | — |
+
+**Max file size:** 100 MB per upload.
+
+---
+
+## PII Detection & Encryption
+
+Aegis detects, masks, and **encrypts** 20+ entity types automatically:
+
+### Global Entities
+- Name, Email, Phone, Credit Card
+- IP Address, IBAN, URL, Passport, Driver's License
+
+### Regional Entities
+
+| Region | Entities |
+|--------|----------|
+| **US** | SSN, Passport, Driver's License |
+| **UK** | NIN, NHS Number |
+| **India** | Aadhaar, PAN |
+| **France** | NIR (Social Security) |
+| **Italy** | Codice Fiscale |
+| **Australia** | TFN |
+| **Canada** | SIN |
+| **Singapore** | NRIC |
+| **Malaysia** | IC Number |
+| **EU** | Passport |
+
+### How It Works
+
+1. **Detection** — Presidio NER + spaCy detects all entity types
+2. **Masking** — Entities replaced with `<PERSON_1>`, `<EMAIL_1>` tokens in stored chunks
+3. **Encryption** — Original PII encrypted with Fernet symmetric key
+4. **Vault** — Ciphertext stored in `pii_vault` table, separate from chunk text
+5. **Key isolation** — `PII_VAULT_KEY` stays in app memory; PostgreSQL never sees it
+
+**Toggle off:** Set `PII_MASKING_ENABLED=false` in `.env` for industries that don't require it (legal, construction, internal tooling).
+
+---
+
+## Architecture & Pipeline
 
 ```
-You upload a file
-    ↓
-System reads it (PDF, Word, Excel, email, etc.)
-    ↓
-Personal info (names, emails, phone numbers) is detected and encrypted
-    ↓
-Content is split into searchable chunks
-    ↓
-AI converts each chunk into numbers (embeddings) for semantic search
-    ↓
-Everything is stored in your private database
-    ↓
-You query it through the API
+Your server
+│
+├── Container: PostgreSQL 16 + pgvector
+│   ├── ingestion_jobs table    — job queue with status, retries, stage flags
+│   ├── document_chunks table   — text chunks with 768-dim embeddings (HNSW index)
+│   └── pii_vault table         — encrypted personal information (Fernet ciphertext)
+│
+├── Container: Ollama (AI model server)
+│   ├── gemma4:e2b              — 2B language model (~1.5 GB)
+│   └── embeddinggemma:300m    — 300M embedding model (~622 MB)
+│
+└── Container: Aegis-ETL (FastAPI app + background worker)
+    │
+    ├── License gate       — validates hardware fingerprint before startup
+    ├── /ingest endpoint   — validates MIME, queues jobs
+    ├── /search endpoint   — hybrid vector + full-text search (RRF) with optional LLM re-ranking
+    ├── /health endpoint   — checks DB + Ollama liveness
+    │
+    └── Background worker (asyncio event loop)
+          │
+          ├── Claims up to 4 jobs per cycle (SKIP LOCKED)
+          ├── Processes concurrently via asyncio.gather
+          │
+          ├── Stage 1: VALIDATED
+          │   └─ MIME detection, size check, path traversal prevention
+          │
+          ├── Stage 2: EXTRACTED
+          │   ├─ Text PDF        → Docling
+          │   ├─ Scanned PDF     → pypdf fallback → Tesseract OCR (parallel pages)
+          │   ├─ Word/Excel/CSV  → native extractors
+          │   └─ Email (MSG/EML) → email parsers
+          │
+          ├── Stage 3: MASKED
+          │   ├─ Presidio NER detects 20+ PII entity types
+          │   ├─ Replace entities with `<PLACEHOLDER>` tokens in chunk text
+          │   ├─ Encrypt original PII with Fernet
+          │   └─ Store ciphertext in pii_vault
+          │
+          ├── Stage 4: EMBEDDED
+          │   ├─ Split chunks: 1000 chars with 200-char overlap
+          │   ├─ Call embeddinggemma:300m via LiteLLM
+          │   ├─ Batch insert into document_chunks (transactional)
+          │   └─ HNSW vector index automatically updated
+          │
+          └── Housekeeping (every 60s)
+                ├─ Stuck-job reset: heartbeat > 5 min → move to PENDING
+                ├─ Dead-letter purge: FAILED_MAX_RETRIES > 7 days → delete
+                └─ VACUUM ANALYZE on ingestion_jobs table
+
+All traffic stays inside Docker's 'aegis-net' bridge network.
+Only port 8000 (app) exposed to the host.
 ```
+
+### Search Modes
+
+#### Standard Semantic Search
+```bash
+curl "http://localhost:8000/search?q=contract+termination&k=5" \
+  -H "X-API-KEY: your-admin-key"
+```
+
+**Method:** Hybrid RRF (Reciprocal Rank Fusion)
+- HNSW cosine similarity (768-dim vectors)
+- pg_trgm trigram distance
+- Full-text `plainto_tsquery` BM25
+
+**Hit@5 rate:** 80–90%
+
+#### LLM Re-ranking (High Precision)
+```bash
+curl "http://localhost:8000/search?q=contract+termination&k=5&rerank=true" \
+  -H "X-API-KEY: your-admin-key"
+```
+
+**Method:** Two-pass scoring
+1. Hybrid RRF retrieves top 10 candidates
+2. gemma4:e2b LLM re-scores for relevance
+3. Return top 5 re-ranked results
+
+**Cost:** ~5s extra latency, higher precision.
+
+**Result chunks always contain `<PERSON>`, `<EMAIL>` placeholders — never raw PII.**
 
 ---
 
@@ -38,9 +244,11 @@ You query it through the API
 | Docker | 20.10+ | `docker --version` |
 | Docker Compose | v2.0+ | `docker compose version` |
 | Python | 3.9+ | `python3 --version` |
+| RAM | 8 GB | Models (~2 GB) + app (~2 GB) + buffer |
+| Disk | 10 GB free | OS + models + data |
 
-**Linux:** Works on any modern distribution.
-**macOS:** Requires Docker Desktop.
+**Linux:** Works on any modern distribution.  
+**macOS:** Requires Docker Desktop.  
 **Windows:** Requires Docker Desktop with WSL2 backend.
 
 ---
@@ -51,71 +259,78 @@ You query it through the API
 curl -sL https://raw.githubusercontent.com/kayomarz97/aegis-etl-installer/master/install.sh | bash
 ```
 
-The installer downloads the required files, runs the setup wizard, handles payment,
-and starts all services automatically. No manual configuration required.
+The installer:
+1. Downloads required files
+2. Runs setup wizard (configuration + payment)
+3. Generates all secrets cryptographically
+4. Handles license activation
+5. Starts all services
+
+**No manual configuration required.**
 
 ---
 
-## What the Setup Wizard Does
+## Setup Wizard Walkthrough
 
-The wizard runs interactively in your terminal and handles everything:
+### Step 1 — Configuration Questions
 
-### Step 1 — Configuration questions
-
-It asks you a few questions about how you want the system to behave:
+Interactive prompts for your deployment:
 
 | Question | Default | What it controls |
 |---|---|---|
-| Enable PII masking? | Yes | Whether personal information is detected and encrypted |
-| Worker concurrency | 4 | How many documents can be processed at the same time |
-| Max OCR jobs | 2 | How many scanned PDFs can be read simultaneously |
-| Vector dimensions | 768 | Precision of AI search (higher = more accurate, more storage) |
+| Enable PII masking? | Yes | Auto-detect and encrypt personal information |
+| Worker concurrency | 4 | How many documents process simultaneously |
+| Max OCR jobs | 2 | Max concurrent scanned-PDF reads |
+| Vector dimensions | 768 | Search precision (higher = more storage) |
 | Enable Swagger docs? | No | Interactive API browser at `/docs` |
 
-### Step 2 — Secret generation
+### Step 2 — Secret Generation
 
-The wizard generates every password and API key automatically using a cryptographically
-secure random generator. You do not need to invent any passwords.
+All passwords and API keys generated securely. You don't invent anything.
 
-### Step 3 — License activation
+```
+✓ POSTGRES_PASSWORD       — database password
+✓ INGEST_API_KEY         — upload key
+✓ ADMIN_API_KEY          — admin key
+✓ PII_VAULT_KEY          — encryption key (if masking enabled)
+✓ AEGIS_VENDOR_SECRET    — licensing secret
+```
 
-The wizard computes a **hardware fingerprint** — a unique identifier tied to your
-server — and opens a payment page in your browser. After payment, your license key
-is delivered automatically to your terminal within seconds. No email, no waiting.
+### Step 3 — License Activation
 
-> **In plain English:** The license is mathematically tied to your specific server.
-> It cannot be copied to another machine. If you move to a new server, contact support
-> for a transfer.
+Hardware fingerprint computed (installation ID + hostname + CPU count) and tied to your server. Opens payment page in browser.
 
-### Step 4 — Services start
+After payment, **license key delivered to terminal within seconds.** No email, no waiting.
 
-The wizard logs into the private Docker registry, downloads the application image,
-and starts all three services automatically.
+> **In plain English:** License is mathematically tied to your specific server. Cannot be copied to another machine. Moving servers requires contacting support.
 
-> **Note:** On first run, the AI models download in the background (about 2 GB total,
-> taking 5–20 minutes depending on your connection). The API starts responding once
-> the models are fully loaded. Watch progress with:
-> ```bash
-> docker logs -f aegis-etl-ollama-1
-> ```
+### Step 4 — Services Start
+
+Logs into private registry, downloads application image, starts 3 containers.
+
+First boot takes 5–20 minutes as AI models download (~2 GB total):
+```bash
+docker logs -f aegis-etl-ollama-1
+```
+
+Once you see `Listening on ...`, the API is ready.
 
 ---
 
-## Resuming an Interrupted Setup
+## Resuming Interrupted Setup
 
-If the wizard is interrupted after payment (e.g., browser closed, network dropped):
+If setup is interrupted after payment (browser closed, network dropped):
 
 ```bash
 cd ~/aegis-etl
 python3 cli/setup.py
 ```
 
-It detects the saved payment state and resumes automatically from where it left off —
-no need to pay again.
+Detects saved payment state and resumes automatically. **No need to pay again.**
 
 ---
 
-## Verifying Everything Works
+## Verifying Installation
 
 ```bash
 curl http://localhost:8000/health
@@ -123,101 +338,85 @@ curl http://localhost:8000/health
 
 Expected response:
 ```json
-{"status": "ok"}
+{"status": "ok", "ollama": "ready", "db": "connected"}
 ```
 
-If you see `"status": "degraded"`, the AI models are still loading — wait a few
-minutes and try again.
+If status is `degraded`, AI models are still loading. Wait 5–10 minutes and retry.
 
 ---
 
 ## Uploading Documents
 
-### From the terminal
+### Single File (cURL)
 
 ```bash
 curl -X POST http://localhost:8000/ingest \
   -H "X-API-KEY: your-ingest-key" \
-  -F "file=@/path/to/document.pdf"
+  -F "file=@contract.pdf"
 ```
 
-Replace `your-ingest-key` with the `INGEST_API_KEY` value printed during setup
-(also stored in `~/aegis-etl/.env`).
-
-### Response
-
+Response:
 ```json
 {"job_id": 42, "status": "PENDING"}
 ```
 
-The system processes documents in the background. Use the job ID to check status:
+### Folder (CLI)
 
 ```bash
-curl http://localhost:8000/admin/override \
-  -X POST \
-  -H "X-API-KEY: your-admin-key" \
-  -H "Content-Type: application/json" \
-  -d '{"job_id": 42}'
+python3 cli/aegis.py ingest ./my-documents/
 ```
 
-### Job statuses
+Crawls locally and sequences individual uploads with progress bar. No memory-bomb bulk API.
 
-| Status | Meaning |
-|---|---|
-| `PENDING` | Queued, waiting to be processed |
-| `PROCESSING` | Being read and indexed right now |
-| `DONE` | Stored and searchable |
-| `FAILED` | Something went wrong — will retry automatically (up to 3 times) |
-| `FAILED_MAX_RETRIES` | Gave up after 3 attempts — check logs for details |
+### Check Job Status
 
----
+```bash
+curl http://localhost:8000/admin/status \
+  -H "X-API-KEY: your-admin-key"
+```
 
-## Supported File Types
+Returns job counts by status (PENDING, PROCESSING, DONE, FAILED, FAILED_MAX_RETRIES).
 
-| Format | Extensions | How it's read |
-|---|---|---|
-| PDF (text-based) | `.pdf` | Direct text extraction |
-| PDF (scanned) | `.pdf` | OCR (optical character recognition) |
-| Word document | `.docx`, `.doc` | Structured text extraction |
-| Excel spreadsheet | `.xlsx`, `.xls` | Cell-by-cell extraction |
-| Outlook email | `.msg` | Headers + body, no GPL libraries |
-| Email file | `.eml` | Headers + body |
-| Plain text | `.txt` | Direct |
-| CSV | `.csv` | Row-by-row |
-| Markdown | `.md` | Direct |
+### Job Statuses Explained
 
-Maximum file size: **100 MB**.
+| Status | Meaning | Next step |
+|--------|---------|-----------|
+| `PENDING` | Queued, waiting | Wait for worker to claim it |
+| `PROCESSING` | Being read + indexed | Worker is actively processing |
+| `DONE` | Stored + searchable | Use `/search` to find content |
+| `FAILED` | Extraction error | Auto-retries up to 3 times |
+| `FAILED_MAX_RETRIES` | Gave up after 3 attempts | Check logs, may need manual override |
 
 ---
 
 ## CLI Tools
 
-After setup, a command-line tool is available for managing your deployment:
+After setup, manage your deployment:
 
 ```bash
-# View current job queue
+# View current job queue summary
 python3 cli/aegis.py status
 
 # Ingest a single file
 python3 cli/aegis.py ingest report.pdf
 
-# Ingest a whole folder (processes files one by one)
+# Ingest entire folder (sequential uploads)
 python3 cli/aegis.py ingest ./documents/
 
 # Watch live logs from all services
 python3 cli/aegis.py logs
 
-# Back up the database to a compressed file
+# Backup database to compressed file
 python3 cli/aegis.py backup
 
-# Restore from a backup (replaces current data — irreversible)
+# Restore from backup (replaces all data — irreversible)
 python3 cli/aegis.py restore aegis_backup_20260408.sql.gz
 
 # Check software version
 python3 cli/aegis.py version
 ```
 
-Set your keys as environment variables so you do not need to type them each time:
+**Export API keys as environment variables** to avoid typing them:
 
 ```bash
 export AEGIS_INGEST_KEY=<value from .env>
@@ -226,155 +425,198 @@ export AEGIS_ADMIN_KEY=<value from .env>
 
 ---
 
-## Security
+## Security Architecture
 
-### API key separation
+### API Key Separation
 
-Two completely separate keys control two completely separate routes:
+Two completely separate keys control two routes:
 
-| Key | Route | What it can do |
-|---|---|---|
-| `INGEST_API_KEY` | `/ingest` only | Upload documents |
-| `ADMIN_API_KEY` | `/admin/*` only | Inspect jobs, trigger retries |
+| Key | Route | Permissions | Use case |
+|-----|-------|-------------|----------|
+| `INGEST_API_KEY` | `/ingest` only | Upload documents | External systems, CI/CD |
+| `ADMIN_API_KEY` | `/admin/*` only | Query jobs, trigger retries | Internal dashboards |
 
-The keys are not interchangeable. An ingest key cannot access admin endpoints and
-vice versa. Give the ingest key to any system that uploads documents. Keep the admin
-key strictly private.
+**Keys are not interchangeable.** An ingest key cannot access admin endpoints. Give ingest key to any system that uploads; keep admin key strictly private.
 
-> **In plain English:** Even if someone gets your upload key, they cannot see job
-> details, trigger retries, or access any administrative function.
+> **In plain English:** If someone steals your upload key, they can upload documents but cannot see job details, trigger retries, or access any admin function.
 
-### PII encryption vault
+### PII Encryption Vault
 
-When PII masking is enabled, personal information (names, emails, phone numbers, IDs,
-SSNs, credit card numbers, passport numbers, IP addresses, IBAN codes) is:
+When PII masking is enabled:
 
-1. **Detected** by an AI named entity recognition model (spaCy + Presidio)
-2. **Replaced** in the stored text with placeholder tokens like `[PERSON_1]`
-3. **Encrypted** using Fernet symmetric encryption and stored in a separate vault table
-4. **Never sent to the database in plaintext** — encryption happens in Python before any SQL
+1. **Detected** — Presidio + spaCy detects 20+ entity types
+2. **Replaced** — Stored text contains `[PERSON_1]`, `[EMAIL_1]`, etc.
+3. **Encrypted** — Original PII encrypted with Fernet symmetric encryption
+4. **Vaulted** — Ciphertext stored in `pii_vault` table (BYTEA column)
+5. **Never in plaintext** — Encryption happens in Python before any SQL
 
-The encryption key (`PII_VAULT_KEY`) is never sent to PostgreSQL. The database only
-ever sees opaque encrypted bytes. Even with full database access, PII cannot be read
-without the vault key.
+The encryption key (`PII_VAULT_KEY`) is **never sent to PostgreSQL.** Database sees only opaque ciphertext. Even with full database backup access, PII is unreadable without the vault key.
 
-> **In plain English:** If someone steals your database backup, they cannot read any
-> names, emails, or personal details from it. The actual data is locked in an encrypted
-> vault that requires a separate key to open.
+> **In plain English:** If someone steals your database backup, they cannot read any names, emails, personal details. The actual data is locked in an encrypted vault requiring a separate key.
 
-### Rate limiting
+### Rate Limiting
 
-The `/ingest` endpoint is rate-limited to 30 requests per minute per API key. Excess
-requests receive a `429 Too Many Requests` response. This prevents accidental or
-deliberate flooding of the processing queue.
+`/ingest` endpoint capped at **30 requests/minute per API key.** Excess requests return `429 Too Many Requests.` Prevents accidental or deliberate queue flooding.
 
-### Path traversal prevention
+### Path Traversal Prevention
 
-The system never uses uploaded filenames to create files on disk. Filenames are
-discarded at the boundary. Only the file content is processed, and it is written to
-a path generated internally that is verified to stay within the data directory.
+Uploaded filenames are **discarded at the boundary.** Files stored by job ID only. Filename extraction is not used.
 
-> **In plain English:** You cannot trick the system into overwriting system files by
-> naming your upload `../../etc/passwd` — the filename is ignored entirely.
+> **In plain English:** You cannot trick the system into overwriting `/etc/passwd` by naming your upload `../../etc/passwd`. The filename is ignored entirely.
 
-### License hardware binding
+### License Hardware Binding
 
-Your license is tied to three things about your server:
+License is mathematically tied to three server attributes:
 
-- A randomly generated installation ID (stored in a Docker volume, survives restarts)
-- A pinned hostname (`aegis-node`, set in the compose file)
-- The number of CPU cores
+- **Installation ID** — random UUID, stored in persistent Docker volume
+- **Hostname** — pinned to `aegis-node` in compose file
+- **CPU count** — from `/proc/cpuinfo`
 
-The license key is `HMAC-SHA256(vendor_secret, fingerprint)`. This means:
-- The key is mathematically derived from your hardware — it cannot be copied to another machine
-- Timing-safe comparison (`hmac.compare_digest`) prevents timing attacks
-- If the vendor secret or fingerprint does not match, the container exits before starting
-
-### CORS control
-
-Cross-Origin Resource Sharing headers are configurable. Default is `["*"]` (permissive,
-fine for internal networks). Restrict in production:
-
+License verification:
 ```
+LICENSE_KEY = HMAC-SHA256(AEGIS_VENDOR_SECRET, fingerprint)
+```
+
+**Timing-safe comparison** (`hmac.compare_digest`) prevents timing attacks.
+
+If vendor secret or fingerprint doesn't match, container exits before starting.
+
+### CORS Configuration
+
+Default: `CORS_ALLOWED_ORIGINS=["*"]` (permissive for internal networks).
+
+**Restrict in production:**
+```bash
+# Add to .env
 CORS_ALLOWED_ORIGINS=["https://your-app.example.com"]
 ```
 
 ---
 
-## Architecture
+## Fault Tolerance & Edge Cases
 
-```
-Your server
-│
-├── Container: db  (PostgreSQL 16 + pgvector)
-│   ├── ingestion_jobs table   — job queue with status, retries, stage flags
-│   ├── document_chunks table  — text chunks with embeddings (HNSW vector index)
-│   └── pii_vault table        — encrypted personal information
-│
-├── Container: ollama  (AI model server)
-│   ├── gemma4:e2b        — language model (~1.5 GB), understands document content
-│   └── embeddinggemma:300m — embedding model (~622 MB), converts text to vectors
-│
-└── Container: app  (Aegis-ETL)
-    │
-    ├── License gate       — validates HMAC before anything else starts
-    ├── /ingest            — accepts uploads, validates MIME type, queues jobs
-    ├── /health            — reports system status including ollama liveness
-    ├── /admin/override    — inspect jobs, trigger retries, adjust priority
-    │
-    └── Background worker
-          ├── Claims up to 4 jobs at once (configurable)
-          ├── Runs them concurrently using asyncio
-          │
-          ├── Stage 1: EXTRACT
-          │   Text-based PDF, Word, Excel, email → structured text
-          │   Scanned PDF → OCR (Tesseract + pdf2image, limited to 2 concurrent)
-          │
-          ├── Stage 2: MASK
-          │   Presidio NER detects 9 entity types
-          │   Fernet encryption, stored in pii_vault
-          │   masked_text → Stage 3
-          │
-          ├── Stage 3: EMBED
-          │   Split into 1000-char chunks (200 overlap)
-          │   LiteLLM → Ollama embeddinggemma:300m → 768-dim vectors
-          │   Batch insert into document_chunks (transactional)
-          │
-          └── Housekeeping (every 60s)
-                ├── Reset stuck jobs (heartbeat > 5 min stale)
-                ├── Purge dead-letter jobs (FAILED_MAX_RETRIES older than 7 days)
-                └── VACUUM ANALYZE ingestion_jobs (database maintenance)
+### Stuck Jobs
+
+**Problem:** A job is processing but the worker crashes before updating the heartbeat.
+
+**Solution:** Housekeeping process (runs every 60s) resets jobs with stale heartbeats (> 5 min) back to PENDING for automatic retry.
+
+```bash
+# Manual intervention if needed
+curl -X POST http://localhost:8000/admin/override \
+  -H "X-API-KEY: your-admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{"job_id": 42}'
 ```
 
-All inter-service traffic stays inside Docker's `aegis-net` bridge network.
-Only the app's port (default 8000) is exposed to the host.
+### Idempotent Stage Flags
+
+**Problem:** Job retries after a crash — should stages run again?
+
+**Solution:** Stage flags (`VALIDATED`, `EXTRACTED`, `MASKED`, `EMBEDDED`) are idempotent. Retrying skips already-completed stages using SQL-level `JSONB ||` operator.
+
+No read-modify-write in Python. Version column prevents race conditions.
+
+### BrokenProcessPool Recovery
+
+**Problem:** Presidio (spaCy NER) runs in a subprocess pool. Pool crashes under concurrent load.
+
+**Solution:** Lifespan hook detects crashes and transparently replaces the pool. Processing continues without restart.
+
+### Memory Governor
+
+**Problem:** Embedding large documents causes OOM on low-RAM servers.
+
+**Solution:** Memory monitor checks RSS every poll cycle. If exceeds threshold, pauses polling for 10s. Prevents queue starvation.
+
+### Dead-Letter Queue
+
+**Problem:** Document extraction fails > 3 times (bad PDF, corrupt XLSX, etc.).
+
+**Solution:** Job moves to `FAILED_MAX_RETRIES` status. Purged after 7 days.
+
+```bash
+# Check DLQ
+curl http://localhost:8000/admin/dlq \
+  -H "X-API-KEY: your-admin-key"
+```
+
+### Ollama Circuit Breaker
+
+**Problem:** Ollama crashes or becomes unresponsive, embedding calls timeout.
+
+**Solution:** Circuit breaker trips after 3 consecutive failures. Pauses embedding calls for 30s, allowing Ollama to recover. Auto-recovers.
+
+Check health:
+```bash
+curl http://localhost:8000/health
+```
+
+### Extraction Timeout
+
+**Problem:** Docling (PDF parser) hangs on corrupted files.
+
+**Solution:** Extraction wrapped in `asyncio.wait_for(timeout=1800)` (30 min). Falls back to `pypdf`, then OCR. If all fail, job marked FAILED for retry.
+
+### Optimistic Locking
+
+**Problem:** Two workers claim the same job simultaneously.
+
+**Solution:** Jobs use versioning + `SKIP LOCKED`. Worker increments `version` when claiming. If another worker already claimed it, UPDATE returns rowcount=0, worker aborts.
 
 ---
 
-## Optional Configuration
+## Configuration Reference
 
-Add any of these to `~/aegis-etl/.env` and restart to apply:
+Add any of these to `~/aegis-etl/.env` and restart:
 
 ```bash
 docker compose down && docker compose up -d
 ```
 
-| Setting | Default | Effect |
+| Variable | Default | Notes |
 |---|---|---|
-| `PII_MASKING_ENABLED=false` | `true` | Disables PII detection. Use for industries like legal or construction where masking is not required. Changing after ingestion requires full re-ingest. |
-| `SWAGGER_ENABLED=true` | `false` | Enables interactive API browser at `http://localhost:8000/docs`. Turn off in production. |
-| `AEGIS_PORT=8001` | `8000` | Changes the port the API listens on. |
-| `WORKER_CONCURRENCY=2` | `4` | Number of documents processed simultaneously. Reduce on low-RAM servers. |
-| `MAX_CONCURRENT_OCR_JOBS=1` | `2` | Simultaneous scanned-PDF jobs. OCR is CPU-heavy — reduce if server is slow. |
-| `CORS_ALLOWED_ORIGINS=["https://app.example.com"]` | `["*"]` | Restrict API access to specific origins in production. |
-| `VECTOR_DIMENSIONS=384` | `768` | One-time choice. Lower = faster search, less storage. Cannot be changed after ingestion without wiping data. |
+| `PII_MASKING_ENABLED` | `true` | Disable for legal/construction (no re-masking after ingest) |
+| `ENABLE_INTERNATIONAL_PII` | `true` | Toggle regional PII recognizers (UK/IN/FR/IT/AU/CA/SG/MY/EU) |
+| `SWAGGER_ENABLED` | `false` | Interactive API browser at `/docs` (turn off in prod) |
+| `AEGIS_PORT` | `8000` | Port the API listens on |
+| `WORKER_CONCURRENCY` | `4` | Documents processed simultaneously |
+| `EMBEDDING_CONCURRENCY` | `4` | Max concurrent Ollama embedding calls |
+| `MAX_CONCURRENT_OCR_JOBS` | `2` | Parallel scanned-PDF jobs (OCR is CPU-heavy) |
+| `EXTRACTION_TIMEOUT_SECONDS` | `1800` | 30 min timeout for Docling; pypdf fallback after |
+| `CHUNK_SIZE` | `1000` | Characters per chunk for embedding |
+| `CHUNK_OVERLAP` | `200` | Overlap between adjacent chunks |
+| `VECTOR_DIMENSIONS` | `768` | **One-time choice — cannot change after ingest without wiping data** |
+| `OLLAMA_MODEL` | `gemma4:e2b` | LLM for re-ranking (`?rerank=true`) |
+| `EMBEDDING_MODEL` | `embeddinggemma:300m` | Embedding model (768-dim) |
+| `MAX_UPLOAD_SIZE_BYTES` | `104857600` | 100 MB max file size |
+| `INGEST_RATE_LIMIT` | `30/minute` | Per-API-key limit on `/ingest` |
+| `CORS_ALLOWED_ORIGINS` | `["*"]` | Restrict to specific origins in production |
+| `DB_POOL_MAX` | `18` | asyncpg connection pool size |
+| `STUCK_JOB_TIMEOUT_SECONDS` | `300` | Heartbeat threshold before stuck-job reset |
+| `HOUSEKEEPING_INTERVAL_SECONDS` | `60` | How often stuck-job reset runs |
 
 ---
 
-## Stopping and Starting
+## API Reference
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/ingest` | `INGEST_API_KEY` | Upload document for async processing |
+| `GET` | `/search?q=...&k=5` | `ADMIN_API_KEY` | Hybrid vector + full-text search (RRF) |
+| `GET` | `/search?q=...&rerank=true` | `ADMIN_API_KEY` | Search with LLM re-ranking (gemma4:e2b) |
+| `GET` | `/health` | — | Liveness check (DB + Ollama) |
+| `GET` | `/version` | — | Backend version |
+| `GET` | `/admin/status` | `ADMIN_API_KEY` | Job queue statistics |
+| `POST` | `/admin/override` | `ADMIN_API_KEY` | Force-retry a failed job |
+| `POST` | `/admin/truncate` | `ADMIN_API_KEY` | Clear all data (benchmark reset) |
+
+---
+
+## Stopping & Starting
 
 ```bash
-# Stop all services (data is preserved)
+# Stop all services (data preserved)
 docker compose down
 
 # Start again
@@ -390,8 +632,7 @@ docker compose down -v
 
 ### "Invalid or mismatched license key"
 
-The license key does not match this server. This can happen if you moved the Docker
-volume to a different machine or changed the server's CPU count.
+License doesn't match this server. Happens if Docker volume moved to different machine or CPU count changed.
 
 ```bash
 # Print your current hardware fingerprint
@@ -402,16 +643,22 @@ Contact support with the fingerprint output.
 
 ### Health returns `"status": "degraded"`
 
-The AI models are still loading. This is normal on first start and takes 5–20 minutes.
-Watch progress:
+AI models still loading. Normal on first start (5–20 min).
 
 ```bash
 docker logs -f aegis-etl-ollama-1
 ```
 
+Wait for `Listening on 0.0.0.0:11434`.
+
 ### Port 8000 already in use
 
-Add `AEGIS_PORT=8001` to `~/aegis-etl/.env` and restart.
+Add to `~/aegis-etl/.env`:
+```
+AEGIS_PORT=8001
+```
+
+Restart: `docker compose down && docker compose up -d`
 
 ### Container keeps restarting
 
@@ -419,11 +666,14 @@ Add `AEGIS_PORT=8001` to `~/aegis-etl/.env` and restart.
 docker compose logs app --tail=50
 ```
 
-The most common causes are a missing `.env` value or a wrong `LICENSE_KEY`.
+Common causes:
+- Missing `.env` value
+- Wrong `LICENSE_KEY`
+- Invalid `AEGIS_VENDOR_SECRET`
 
 ### "Permission denied" on data directory
 
-If using a custom bind-mount path, it must be owned by UID 999 (the internal service user):
+If using custom bind-mount path, must be owned by UID 999:
 
 ```bash
 sudo chown -R 999:999 /path/to/your/data-folder
@@ -431,26 +681,69 @@ sudo chown -R 999:999 /path/to/your/data-folder
 
 ### Jobs stuck in PROCESSING
 
-The housekeeping process resets stuck jobs automatically every 5 minutes. If a job
-has been `PROCESSING` for more than 5 minutes, it will be automatically moved back to
-`PENDING` for retry. Check logs for the root cause:
+Housekeeping resets stuck jobs every 5 minutes. If stuck > 5 min, auto-moves back to PENDING.
 
+Check logs:
 ```bash
 docker compose logs app --tail=100 | grep "ERROR\|WARNING"
+```
+
+### Slow extraction on old PDFs
+
+Scanned PDFs trigger OCR (Tesseract). May hit `MAX_CONCURRENT_OCR_JOBS` limit (default: 2).
+
+Options:
+1. Reduce `WORKER_CONCURRENCY` to 2 if on low-RAM server
+2. Reduce `MAX_CONCURRENT_OCR_JOBS` to 1 if OCR bottleneck
+3. Increase server RAM
+
+### Search returns no results
+
+Check:
+1. Are documents in `DONE` status? (`python3 cli/aegis.py status`)
+2. Is query too specific? Try broader terms
+3. Try `?rerank=true` for precision mode
+
+### Models didn't download
+
+```bash
+docker compose logs ollama | tail -50
+```
+
+If stuck, manually pull:
+```bash
+docker compose exec ollama ollama pull gemma4:e2b
+docker compose exec ollama ollama pull embeddinggemma:300m
 ```
 
 ---
 
 ## Getting Help
 
-Collect this before contacting support:
+Collect this information before contacting support:
 
 ```bash
 docker compose ps > status.txt
 docker compose logs app --tail=100 > app-logs.txt
+docker compose run --rm app python src/licensing/validator.py --diagnostic > fingerprint.txt
 ```
 
-Check `app-logs.txt` to confirm it contains no API keys or passwords, then send it
-along with a description of the problem.
+Check `app-logs.txt` to confirm it contains no API keys or passwords, then send logs + description of problem.
 
-Contact: *(support contact coming soon)*
+**Contact:** kayomarz97@gmail.com
+
+---
+
+## License
+
+Aegis-ETL is licensed per server. License is cryptographically tied to your hardware fingerprint (installation ID + hostname + CPU count). Cannot be transferred to another machine.
+
+See [CLAUDE.md](https://github.com/kayomarz97/aegis-etl/blob/master/CLAUDE.md) for complete technical reference and architecture decisions.
+
+---
+
+## References
+
+- [Benchmark Results](https://github.com/kayomarz97/aegis-etl/blob/master/benchmark/results/BENCHMARK.md) — Full competitor analysis
+- [Source Code](https://github.com/kayomarz97/aegis-etl) — Private repository
+- [Architecture](https://github.com/kayomarz97/aegis-etl/blob/master/CLAUDE.md) — Complete technical reference
