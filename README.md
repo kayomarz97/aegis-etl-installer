@@ -740,7 +740,7 @@ Check `app-logs.txt` to confirm it contains no API keys or passwords, then send 
 
 Aegis-ETL is licensed per server. License is cryptographically tied to your hardware fingerprint (installation ID + hostname + CPU count). Cannot be transferred to another machine.
 
-See [CLAUDE.md](https://github.com/kayomarz97/aegis-etl/blob/master/CLAUDE.md) for complete technical reference and architecture decisions.
+
 
 ---
 
