@@ -2,6 +2,9 @@
 
 **On-premise enterprise document ingestion with built-in PII masking, vector search, and encryption.**
 
+
+DISCLAIMER- It was me testing how embeddings work have shut the service down
+
 Transform raw documents into a searchable, privacy-safe knowledge base — with zero data leaving your server.
 
 ```
